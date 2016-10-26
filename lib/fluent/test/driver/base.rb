@@ -23,6 +23,9 @@ require 'timeout'
 module Fluent
   module Test
     module Driver
+      class TestTimedOut < RuntimeError
+      end
+
       class Base
         attr_reader :instance, :logs
 
@@ -121,20 +124,21 @@ module Fluent
 
         def run_actual(timeout: nil, &block)
           if @instance.respond_to?(:_threads)
-            until @instance._threads.values.all?(&:alive?)
-              sleep 0.01
-            end
+            sleep 0.1 until @instance._threads.values.all?(&:alive?)
           end
 
           if @instance.respond_to?(:event_loop_running?)
-            until @instance.event_loop_running?
-              sleep 0.01
-            end
+            sleep 0.1 until @instance.event_loop_running?
+          end
+
+          if @instance.respond_to?(:_child_process_processes)
+            sleep 0.1 until @instance._child_process_processes.values.all?{|pinfo| pinfo.alive }
           end
 
           timeout ||= DEFAULT_TIMEOUT
-          stop_at = Time.now + timeout
-          @run_breaking_conditions << ->(){ Time.now >= stop_at }
+          clock_id = Process::CLOCK_MONOTONIC rescue Process::CLOCK_MONOTONIC_RAW
+          stop_at = Process.clock_gettime(clock_id) + timeout
+          @run_breaking_conditions << ->(){ Process.clock_gettime(clock_id) >= stop_at }
 
           if !block_given? && @run_post_conditions.empty? && @run_breaking_conditions.empty?
             raise ArgumentError, "no stop conditions nor block specified"
@@ -152,14 +156,14 @@ module Fluent
               proc.call
             end
           rescue Timeout::Error
-            @broken = true
+            raise TestTimedOut, "Test case timed out with hard limit."
           end
           return_value
         end
 
         def stop?
           # Should stop running if post conditions are not registered.
-          return true unless @run_post_conditions
+          return true unless @run_post_conditions || @run_post_conditions.empty?
 
           # Should stop running if all of the post conditions are true.
           return true if @run_post_conditions.all? {|proc| proc.call }
